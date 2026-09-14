@@ -22,6 +22,22 @@ let ticking = false;
 let recognition = null;
 let isListening = false;
 let voiceRepliesEnabled = supportsVoiceOutput;
+let preferredVoice = null;
+
+// Well-known male English voices, ordered by how natural/professional they
+// sound across platforms (Chrome/Google, Windows/Edge, macOS/Safari).
+const preferredVoiceNames = [
+  'Google UK English Male',
+  'Microsoft Guy - English (United States)',
+  'Microsoft David - English (United States)',
+  'Microsoft David',
+  'Microsoft Ryan - English (United Kingdom)',
+  'Microsoft Mark - English (United States)',
+  'Microsoft Mark',
+  'Daniel',
+  'Alex',
+  'Google US English',
+];
 
 setupScrollReveal();
 setupHeroMotion();
@@ -652,6 +668,9 @@ function setupVoiceMode() {
       voiceRepliesEnabled = true;
     }
     updateVoiceToggleUi();
+    loadPreferredVoice();
+    // Chrome loads its voice list asynchronously — pick again once it fires.
+    window.speechSynthesis.addEventListener('voiceschanged', loadPreferredVoice);
     voiceToggle.addEventListener('click', () => {
       voiceRepliesEnabled = !voiceRepliesEnabled;
       if (!voiceRepliesEnabled) stopSpeaking();
@@ -735,6 +754,11 @@ function speak(text) {
 
   stopSpeaking();
   const utterance = new SpeechSynthesisUtterance(spokenText);
+  if (preferredVoice) utterance.voice = preferredVoice;
+  // Slightly lower pitch and a measured pace reads as calmer/more professional
+  // than the default assistant chirp.
+  utterance.pitch = 0.92;
+  utterance.rate = 0.98;
   window.speechSynthesis.speak(utterance);
 }
 
@@ -742,6 +766,32 @@ function stopSpeaking() {
   if (supportsVoiceOutput && window.speechSynthesis.speaking) {
     window.speechSynthesis.cancel();
   }
+}
+
+function loadPreferredVoice() {
+  preferredVoice = pickPreferredVoice();
+}
+
+function pickPreferredVoice() {
+  const voices = window.speechSynthesis.getVoices();
+  if (!voices.length) return null;
+
+  for (const name of preferredVoiceNames) {
+    const match = voices.find((voice) => voice.name === name);
+    if (match) return match;
+  }
+
+  // No exact match — fall back to any English voice whose name hints at a
+  // male voice (covers locales/platforms not in the curated list above).
+  const maleHinted = voices.find(
+    (voice) =>
+      /^en/i.test(voice.lang) &&
+      /\b(male|david|daniel|alex|mark|guy|james|thomas|ryan|brian)\b/i.test(voice.name),
+  );
+  if (maleHinted) return maleHinted;
+
+  // Last resort — let the browser use its own default voice.
+  return null;
 }
 
 function stripForSpeech(text) {

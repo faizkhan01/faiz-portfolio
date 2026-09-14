@@ -1371,15 +1371,25 @@ function getGroqRequestOptions(question) {
 function getContextMessages(messages, groqRequestOptions) {
   if (groqRequestOptions.provider === 'groq-web-search') return [];
 
-  return messages
-    .filter((message) => message && ['user', 'assistant'].includes(message.role))
-    .filter((message) => {
-      return !looksLikeWebSearchAnswer(message.content);
-    })
-    .map((message) => ({
-      role: message.role,
-      content: String(message.content || '').slice(0, 1000),
-    }));
+  const turns = messages.filter((message) => message && ['user', 'assistant'].includes(message.role));
+  const kept = [];
+
+  for (const message of turns) {
+    if (message.role === 'assistant' && looksLikeWebSearchAnswer(message.content)) {
+      // Drop this web-search-flavored answer AND the user question that
+      // triggered it. Dropping only the answer would leave that question
+      // dangling with no reply in the context, and the model tends to
+      // "catch up" by re-answering it before the actual current question.
+      if (kept.length && kept[kept.length - 1].role === 'user') kept.pop();
+      continue;
+    }
+    kept.push(message);
+  }
+
+  return kept.map((message) => ({
+    role: message.role,
+    content: String(message.content || '').slice(0, 1000),
+  }));
 }
 
 function buildUserQuestion(question, groqRequestOptions) {
