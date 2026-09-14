@@ -157,9 +157,22 @@
               <strong>Faiz AI</strong>
               <span>Online</span>
             </div>
-            <button class="icon-button" type="button" id="clearChat" aria-label="Clear chat" title="Clear chat">
-              x
-            </button>
+            <div class="chat-header-actions">
+              <button
+                class="icon-button"
+                type="button"
+                id="voiceToggle"
+                aria-label="Turn off spoken replies"
+                title="Turn off spoken replies"
+                aria-pressed="true"
+                hidden
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>
+              </button>
+              <button class="icon-button" type="button" id="clearChat" aria-label="Clear chat" title="Clear chat">
+                x
+              </button>
+            </div>
           </div>
           <div class="chat-messages" id="chatMessages" aria-live="polite">
             <div class="message assistant">
@@ -178,7 +191,19 @@
               placeholder="Ask about experience, AI work, architecture, or role fit"
               required
             ></textarea>
-            <button class="button primary" type="submit">Send</button>
+            <div class="chat-form-actions">
+              <button
+                class="icon-button mic-button"
+                type="button"
+                id="micButton"
+                aria-label="Speak your question"
+                title="Speak your question"
+                hidden
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>
+              </button>
+              <button class="button primary" type="submit">Send</button>
+            </div>
           </form>
           <p class="chat-status" id="chatStatus" role="status"></p>
         </aside>

@@ -3,6 +3,8 @@ const chatInput = document.querySelector('#chatInput');
 const chatMessages = document.querySelector('#chatMessages');
 const chatStatus = document.querySelector('#chatStatus');
 const clearChat = document.querySelector('#clearChat');
+const micButton = document.querySelector('#micButton');
+const voiceToggle = document.querySelector('#voiceToggle');
 const promptButtons = document.querySelectorAll('[data-question]');
 const chatPanel = document.querySelector('.chat-panel');
 const heroImage = document.querySelector('.hero-image');
@@ -11,14 +13,22 @@ const heroTitleText = document.querySelector('#heroTitleText');
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const chatRetryDelays = [900, 1800, 3200, 5200];
 
+const SpeechRecognitionApi = window.SpeechRecognition || window.webkitSpeechRecognition;
+const supportsVoiceInput = Boolean(SpeechRecognitionApi);
+const supportsVoiceOutput = Boolean(window.speechSynthesis);
+
 let history = [];
 let ticking = false;
+let recognition = null;
+let isListening = false;
+let voiceRepliesEnabled = supportsVoiceOutput;
 
 setupScrollReveal();
 setupHeroMotion();
 setupMetricCountUp();
 setupScrollProgress();
 setupHeroTitleRotator();
+setupVoiceMode();
 
 chatForm.addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -35,6 +45,7 @@ chatForm.addEventListener('submit', async (event) => {
     assistantMessage = appendStreamingAssistantMessage();
     const answer = await streamAssistantAnswer(question, assistantMessage);
     history.push({ role: 'assistant', content: answer });
+    speak(answer);
   } catch (error) {
     if (assistantMessage) {
       updateAssistantMessage(
@@ -62,6 +73,7 @@ chatInput.addEventListener('keydown', (event) => {
 });
 
 clearChat.addEventListener('click', () => {
+  stopSpeaking();
   history = [];
   chatMessages.innerHTML = '';
   appendMessage(
@@ -409,6 +421,7 @@ function appendText(fragment, value) {
 function setLoading(isLoading) {
   chatForm.querySelector('button[type="submit"]').disabled = isLoading;
   chatInput.disabled = isLoading;
+  if (supportsVoiceInput) micButton.disabled = isLoading;
   chatStatus.textContent = isLoading ? 'Thinking...' : '';
   chatPanel.classList.toggle('is-thinking', isLoading);
 }
@@ -620,4 +633,122 @@ function escapeHtml(value) {
     };
     return entities[char];
   });
+}
+
+function setupVoiceMode() {
+  if (supportsVoiceInput) {
+    micButton.hidden = false;
+    micButton.addEventListener('click', () => {
+      if (isListening) stopListening();
+      else startListening();
+    });
+  }
+
+  if (supportsVoiceOutput) {
+    voiceToggle.hidden = false;
+    try {
+      voiceRepliesEnabled = window.localStorage.getItem('faiz-voice-replies') !== 'off';
+    } catch {
+      voiceRepliesEnabled = true;
+    }
+    updateVoiceToggleUi();
+    voiceToggle.addEventListener('click', () => {
+      voiceRepliesEnabled = !voiceRepliesEnabled;
+      if (!voiceRepliesEnabled) stopSpeaking();
+      try {
+        window.localStorage.setItem('faiz-voice-replies', voiceRepliesEnabled ? 'on' : 'off');
+      } catch {
+        // Private-browsing/storage-denied — preference just won't persist across reloads.
+      }
+      updateVoiceToggleUi();
+    });
+  }
+}
+
+function updateVoiceToggleUi() {
+  voiceToggle.setAttribute('aria-pressed', String(voiceRepliesEnabled));
+  voiceToggle.title = voiceRepliesEnabled ? 'Turn off spoken replies' : 'Turn on spoken replies';
+  voiceToggle.setAttribute('aria-label', voiceToggle.title);
+  voiceToggle.innerHTML = voiceRepliesEnabled
+    ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>'
+    : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line></svg>';
+}
+
+function startListening() {
+  if (!supportsVoiceInput || isListening || chatInput.disabled) return;
+  stopSpeaking();
+
+  recognition = new SpeechRecognitionApi();
+  recognition.lang = 'en-US';
+  recognition.interimResults = true;
+  recognition.maxAlternatives = 1;
+
+  recognition.onstart = () => {
+    isListening = true;
+    micButton.classList.add('is-listening');
+    micButton.title = 'Stop listening';
+    micButton.setAttribute('aria-label', 'Stop listening');
+    chatStatus.textContent = 'Listening...';
+  };
+
+  recognition.onresult = (event) => {
+    let transcript = '';
+    for (const result of event.results) {
+      transcript += result[0].transcript;
+    }
+    chatInput.value = transcript;
+
+    const lastResult = event.results[event.results.length - 1];
+    if (lastResult.isFinal && transcript.trim()) {
+      chatForm.requestSubmit();
+    }
+  };
+
+  recognition.onerror = (event) => {
+    if (event.error === 'no-speech' || event.error === 'aborted') return;
+    chatStatus.textContent = 'Could not hear you — please try again or type your question.';
+  };
+
+  recognition.onend = () => {
+    isListening = false;
+    micButton.classList.remove('is-listening');
+    micButton.title = 'Speak your question';
+    micButton.setAttribute('aria-label', 'Speak your question');
+    if (chatStatus.textContent === 'Listening...') chatStatus.textContent = '';
+  };
+
+  try {
+    recognition.start();
+  } catch {
+    isListening = false;
+  }
+}
+
+function stopListening() {
+  if (recognition && isListening) recognition.stop();
+}
+
+function speak(text) {
+  if (!supportsVoiceOutput || !voiceRepliesEnabled) return;
+  const spokenText = stripForSpeech(text);
+  if (!spokenText) return;
+
+  stopSpeaking();
+  const utterance = new SpeechSynthesisUtterance(spokenText);
+  window.speechSynthesis.speak(utterance);
+}
+
+function stopSpeaking() {
+  if (supportsVoiceOutput && window.speechSynthesis.speaking) {
+    window.speechSynthesis.cancel();
+  }
+}
+
+function stripForSpeech(text) {
+  return String(text || '')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/(https?:\/\/[^\s]+|\/assets\/[^\s]+)/g, '')
+    .replace(/^[-*•]\s+/gm, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
