@@ -13,62 +13,30 @@ loadLocalEnv(envFile);
 const port = Number(process.env.PORT || 4173);
 
 /*
- * Primary dynamic-chat provider selection.
- * AI_PROVIDER=gemini routes the primary provider to Google's Gemini API through
- * its OpenAI-compatible chat-completions endpoint, so the existing Groq request,
- * stream, and parsing helpers work unchanged. OpenRouter stays the fallback.
- * Any other value (or an unset key) keeps Groq/Grok as the primary provider.
- *
- * For current-world (web-search) questions under Gemini, the request instead
- * goes to Gemini's native generateContent endpoint with the built-in
- * `google_search` grounding tool, and answers cite the real grounded sources
- * returned in `groundingMetadata` (see geminiWebSearchModel below for the
- * free-tier constraint). OpenRouter still backs it up on failure.
+ * Groq/Grok is the dynamic-chat provider (free tier, no billing needed).
  */
-const aiProvider = String(process.env.AI_PROVIDER || '').trim().toLowerCase();
-const useGemini = aiProvider === 'gemini' && Boolean(process.env.GEMINI_API_KEY);
-const geminiModel = process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite';
-/*
- * Grounding with Google Search is "Not available" on the free tier for the
- * Gemini 3.x models, but free (up to 500 requests/day) for Gemini 2.5
- * Flash / Flash-Lite. So current-world questions use a dedicated 2.5 model
- * for grounding while the main portfolio chat can stay on GEMINI_MODEL.
- */
-const geminiWebSearchModel = process.env.GEMINI_WEB_SEARCH_MODEL || 'gemini-2.5-flash-lite';
-const geminiChatCompletionsUrl =
-  process.env.GEMINI_CHAT_COMPLETIONS_URL ||
-  'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
-const geminiGenerateContentBaseUrl =
-  process.env.GEMINI_GENERATE_CONTENT_BASE_URL ||
-  'https://generativelanguage.googleapis.com/v1beta/models';
-const geminiGroundingEnabled =
-  useGemini && String(process.env.GEMINI_GROUNDING ?? 'true').trim().toLowerCase() !== 'false';
-
-const groqApiKey = useGemini
-  ? process.env.GEMINI_API_KEY
-  : process.env.GROQ_API_KEY || process.env.GROK_API_KEY || '';
-const groqModel = useGemini
-  ? geminiModel
-  : process.env.GROQ_CHAT_MODEL || process.env.GROK_CHAT_MODEL || 'llama-3.1-8b-instant';
-const groqWebSearchModel = useGemini
-  ? geminiWebSearchModel
-  : process.env.GROQ_WEB_SEARCH_MODEL || process.env.GROK_WEB_SEARCH_MODEL || 'groq/compound-mini';
-const groqChatCompletionsUrl = useGemini
-  ? geminiChatCompletionsUrl
-  : process.env.GROQ_CHAT_COMPLETIONS_URL ||
-    process.env.GROK_CHAT_COMPLETIONS_URL ||
-    'https://api.groq.com/openai/v1/chat/completions';
+const groqApiKey = process.env.GROQ_API_KEY || process.env.GROK_API_KEY || '';
+const groqModel = process.env.GROQ_CHAT_MODEL || process.env.GROK_CHAT_MODEL || 'llama-3.1-8b-instant';
+const groqWebSearchModel =
+  process.env.GROQ_WEB_SEARCH_MODEL || process.env.GROK_WEB_SEARCH_MODEL || 'groq/compound-mini';
+const groqChatCompletionsUrl =
+  process.env.GROQ_CHAT_COMPLETIONS_URL ||
+  process.env.GROK_CHAT_COMPLETIONS_URL ||
+  'https://api.groq.com/openai/v1/chat/completions';
 const groqMaxTokens =
   Number.parseInt(process.env.GROQ_MAX_TOKENS || process.env.GROK_MAX_TOKENS || '550', 10) || 550;
-const openRouterApiKey = process.env.OPENROUTER_API_KEY || '';
-const openRouterModel = process.env.OPENROUTER_CHAT_MODEL || 'openrouter/auto';
-const openRouterWebSearchModel = process.env.OPENROUTER_WEB_SEARCH_MODEL || openRouterModel;
-const openRouterChatCompletionsUrl =
-  process.env.OPENROUTER_CHAT_COMPLETIONS_URL || 'https://openrouter.ai/api/v1/chat/completions';
-const openRouterMaxTokens =
-  Number.parseInt(process.env.OPENROUTER_MAX_TOKENS || '500', 10) || 500;
-const openRouterSiteUrl = process.env.OPENROUTER_SITE_URL || 'https://faizurrahman-portfolio.web.app';
-const openRouterAppName = process.env.OPENROUTER_APP_NAME || 'Md. Faizur Rahman Khan Portfolio';
+
+/*
+ * Optional dedicated search API for current-world questions, tried before
+ * Groq's own web-search model. Real search results come from Tavily, and
+ * Groq just writes the answer from them (a plain chat call, no agentic tool
+ * use) — more reliable than Groq's compound/agentic models, which have hit
+ * both payload-size limits and tool-call hallucinations on the free tier.
+ */
+const tavilyApiKey = process.env.TAVILY_API_KEY || '';
+const tavilySearchUrl = process.env.TAVILY_SEARCH_URL || 'https://api.tavily.com/search';
+const tavilyMaxResults = Number.parseInt(process.env.TAVILY_MAX_RESULTS || '5', 10) || 5;
+
 const resumeDownloadPath = '/assets/Md.%20Faizur%20Rahman%20Khan%20Resume.pdf';
 const currentDateLabel = getCurrentDateLabel();
 const currentDateIso = getCurrentDateIso();
@@ -179,9 +147,8 @@ const server = createServer(async (request, response) => {
 server.listen(port, () => {
   console.log(`Portfolio website running at http://localhost:${port}`);
   console.log(
-    `[chat] primary provider: ${useGemini ? `gemini (${groqModel})` : `groq (${groqModel})`}` +
-      `${useGemini ? `, web search: ${geminiGroundingEnabled ? `gemini google_search grounding (${groqWebSearchModel})` : 'model-only'}` : ''}` +
-      `${openRouterApiKey ? ', fallback: openrouter' : ', no fallback configured'}`,
+    `[chat] primary provider: groq (${groqModel})` +
+      `, web search: ${tavilyApiKey ? `tavily (${groqModel})` : `${groqWebSearchModel} (model-only)`}`,
   );
 });
 
@@ -214,9 +181,9 @@ async function handleChat(request, response) {
     return;
   }
 
-  if (!groqApiKey && !openRouterApiKey) {
+  if (!groqApiKey) {
     sendJson(response, 503, {
-      error: 'Portfolio chat is not configured. Set GROK_API_KEY/GROQ_API_KEY or OPENROUTER_API_KEY on the server.',
+      error: 'Portfolio chat is not configured. Set GROK_API_KEY/GROQ_API_KEY on the server.',
     });
     return;
   }
@@ -273,77 +240,31 @@ async function streamDynamicPortfolioAnswer(messages, response, groqRequestOptio
     }
 
     let hasContent = false;
-    let streamProvider = groqRequestOptions.provider;
-    const streamSources = [];
-    const seenStreamSourceUrls = new Set();
-    const onSource = (source) => {
-      if (streamSources.length >= 5) return;
-      const [cleanSource] = dedupeSources([source]);
-      if (!cleanSource || seenStreamSourceUrls.has(cleanSource.url)) return;
-      seenStreamSourceUrls.add(cleanSource.url);
-      streamSources.push(cleanSource);
-    };
 
-    try {
-      if (!groqApiKey) throw new Error('Groq is not configured');
+    if (!groqApiKey) throw new Error('AI provider is not configured');
 
-      await retryGroqRequest(
-        async () => {
-          hasContent = false;
-          await streamGroq(messages, groqRequestOptions, (delta) => {
-            if (!delta) return;
-            hasContent = true;
-            writeJsonLine(response, {
-              type: 'chunk',
-              delta,
-            });
-          }, onSource);
-        },
-        {
-          shouldRetry: (error) => !hasContent && isRetryableGroqError(error),
-        },
-      );
-
-      if (!hasContent) throw new Error('Groq returned an empty stream');
-    } catch (error) {
-      if (hasContent || !openRouterApiKey) throw error;
-      console.error('[groq-stream-fallback]', error.message);
-      await streamOpenRouter(messages, groqRequestOptions, (delta) => {
-        if (!delta) return;
-        hasContent = true;
-        writeJsonLine(response, {
-          type: 'chunk',
-          delta,
+    await retryGroqRequest(
+      async () => {
+        hasContent = false;
+        await streamGroq(messages, groqRequestOptions, (delta) => {
+          if (!delta) return;
+          hasContent = true;
+          writeJsonLine(response, {
+            type: 'chunk',
+            delta,
+          });
         });
-      }, onSource);
-      streamProvider =
-        groqRequestOptions.provider === 'groq-web-search'
-          ? 'openrouter-web-search'
-          : 'openrouter';
-    }
+      },
+      {
+        shouldRetry: (error) => !hasContent && isRetryableGroqError(error),
+      },
+    );
 
     if (!hasContent) throw new Error('AI provider returned an empty stream');
 
-    if (groqRequestOptions.provider === 'groq-web-search') {
-      if (!streamSources.length) {
-        const fallbackSources = await fetchOpenRouterWebSources(messages, groqRequestOptions).catch((error) => {
-          console.error('[web-source-fallback]', error.message);
-          return [];
-        });
-        fallbackSources.forEach(onSource);
-      }
-
-      if (streamSources.length) {
-        writeJsonLine(response, {
-          type: 'chunk',
-          delta: `\n\n${formatVerifiedSources(streamSources)}`,
-        });
-      }
-    }
-
     writeJsonLine(response, {
       type: 'done',
-      provider: streamProvider,
+      provider: groqRequestOptions.provider,
     });
   } catch (error) {
     console.error('[portfolio-chat-stream]', error.message);
@@ -441,38 +362,37 @@ async function generateDynamicPortfolioAnswer(messages, groqRequestOptions) {
 
 async function generateAiAnswerWithFallback(messages, groqRequestOptions) {
   const errors = [];
-  const useGrounding =
-    geminiGroundingEnabled && groqRequestOptions.provider === 'groq-web-search';
+  const isWebSearch = groqRequestOptions.provider === 'groq-web-search';
+
+  // Tavily is the preferred web-search path when configured: more reliable
+  // than Groq's own compound/agentic models, which have hit both payload-size
+  // limits and tool-call hallucinations on the free tier.
+  if (isWebSearch && tavilyApiKey) {
+    try {
+      const result = await answerWebSearchWithTavily(messages, groqRequestOptions);
+      return { ...result, provider: groqRequestOptions.provider };
+    } catch (error) {
+      errors.push(`Tavily: ${error.message}`);
+      console.error('[tavily-search]', error.message);
+      // Fall through to the plain provider below.
+    }
+  }
 
   if (groqApiKey) {
     try {
-      const result = await retryGroqRequest(() =>
-        useGrounding
-          ? callGeminiGrounded(messages, groqRequestOptions)
-          : callGroq(messages, groqRequestOptions),
-      );
+      const result = await retryGroqRequest(() => callGroq(messages, groqRequestOptions));
       return {
         ...result,
         provider: groqRequestOptions.provider,
       };
     } catch (error) {
-      const label = useGrounding ? 'Gemini' : 'Groq';
-      errors.push(`${label}: ${error.message}`);
-      console.error(useGrounding ? '[gemini-grounded-fallback]' : '[groq-fallback]', error.message);
-    }
-  }
-
-  if (openRouterApiKey) {
-    try {
-      return await callOpenRouter(messages, groqRequestOptions);
-    } catch (error) {
-      errors.push(`OpenRouter: ${error.message}`);
-      console.error('[openrouter]', error.message);
+      errors.push(`Groq: ${error.message}`);
+      console.error('[groq-fallback]', error.message);
       throw error;
     }
   }
 
-  throw new Error(`All configured AI providers failed. ${errors.join(' | ')}`);
+  throw new Error(`No AI provider is configured. ${errors.join(' | ')}`);
 }
 
 async function callGroq(messages, groqRequestOptions) {
@@ -507,201 +427,89 @@ async function callGroq(messages, groqRequestOptions) {
 }
 
 /*
- * Native Gemini generateContent call with the built-in google_search grounding
- * tool. Used for current-world questions when AI_PROVIDER=gemini. Returns the
- * answer plus the real grounded web sources from groundingMetadata.
+ * Tavily-backed web search: fetches real results for the question, then asks
+ * whichever primary provider is active to write the answer from them as a
+ * plain chat call (no agentic tool use on the provider's side), so it works
+ * the same regardless of which provider is primary.
  */
-async function callGeminiGrounded(messages, groqRequestOptions) {
-  const url =
-    `${geminiGenerateContentBaseUrl}/${encodeURIComponent(groqRequestOptions.model)}:generateContent`;
-  const aiResponse = await fetchWithTimeout(url, {
-    method: 'POST',
-    headers: {
-      'x-goog-api-key': groqApiKey,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(buildGeminiGroundedPayload(messages, groqRequestOptions)),
-  }, groqRequestOptions.timeoutMs);
+async function answerWebSearchWithTavily(messages, groqRequestOptions) {
+  const query = cleanSearchQuery(getLastUserMessage(messages));
+  if (!query) throw new Error('No question to search for');
 
-  if (!aiResponse.ok) {
-    const errorBody = await aiResponse.text();
-    const error = new Error(`HTTP ${aiResponse.status}: ${errorBody.slice(0, 500)}`);
-    error.status = aiResponse.status;
-    setProviderErrorDetails(error, errorBody);
-    throw error;
-  }
+  const results = await fetchTavilyResults(query);
+  if (!results.length) return { answer: '', sources: [] };
 
-  const data = await aiResponse.json();
+  const referenceMaterial = results
+    .map((result, index) => `[${index + 1}] ${result.title}\n${result.content}`)
+    .join('\n\n');
+
+  const answerMessages = [
+    { role: 'system', content: buildTavilyAnswerPrompt() },
+    { role: 'user', content: `Question: ${query}\n\nReference material:\n${referenceMaterial}` },
+  ];
+
+  // Use the plain chat model, not the (possibly search-specialized/agentic)
+  // web-search model — this call only needs to summarize given text.
+  // Synthesizing from several search results needs more headroom than the
+  // 360/420-token web-search budget tuned for a model doing its own search.
+  const primaryOptions = { ...groqRequestOptions, model: groqModel, maxTokens: Math.max(groqRequestOptions.maxTokens, 550) };
+  const primaryResult = await callGroq(answerMessages, primaryOptions);
+
   return {
-    answer: extractGeminiText(data),
-    sources: extractGeminiGroundingSources(data),
+    answer: primaryResult.answer,
+    sources: results.map((result) => ({ title: result.title, url: result.url })).slice(0, 5),
   };
 }
 
-function buildGeminiGroundedPayload(messages, groqRequestOptions) {
-  const systemParts = [];
-  const contents = [];
-
-  for (const message of messages) {
-    const content = String(message?.content || '').trim();
-    if (!content) continue;
-
-    if (message.role === 'system') {
-      systemParts.push({ text: content });
-      continue;
-    }
-
-    contents.push({
-      role: message.role === 'assistant' ? 'model' : 'user',
-      parts: [{ text: content }],
-    });
-  }
-
-  const payload = {
-    contents,
-    tools: [{ google_search: {} }],
-    generationConfig: {
-      temperature: 0,
-      // Generous cap: Gemini counts internal reasoning tokens against this, and
-      // an exhausted budget returns empty text.
-      maxOutputTokens: Math.max(groqRequestOptions.maxTokens * 4, 2048),
-    },
-  };
-
-  if (systemParts.length) payload.systemInstruction = { parts: systemParts };
-
-  return payload;
-}
-
-function extractGeminiText(data) {
-  const parts = data?.candidates?.[0]?.content?.parts;
-  if (!Array.isArray(parts)) return '';
-  return parts.map((part) => part?.text || '').join('').trim();
-}
-
-function extractGeminiGroundingSources(data) {
-  const chunks = data?.candidates?.[0]?.groundingMetadata?.groundingChunks;
-  if (!Array.isArray(chunks)) return [];
-
-  const sources = [];
-  const seenUrls = new Set();
-
-  for (const chunk of chunks) {
-    const web = chunk?.web || {};
-    const url = String(web.uri || '').trim();
-    const title = cleanSourceTitle(web.title || web.uri || '');
-    if (!url || !/^https?:\/\//i.test(url) || seenUrls.has(url)) continue;
-
-    seenUrls.add(url);
-    sources.push({ title: title || urlToSourceTitle(url), url });
-    if (sources.length >= 5) break;
-  }
-
-  return sources;
-}
-
-async function callOpenRouter(messages, groqRequestOptions) {
-  const usesWebSearch = groqRequestOptions.provider === 'groq-web-search';
-  const aiResponse = await fetchWithTimeout(openRouterChatCompletionsUrl, {
+async function fetchTavilyResults(query) {
+  const aiResponse = await fetchWithTimeout(tavilySearchUrl, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${openRouterApiKey}`,
+      Authorization: `Bearer ${tavilyApiKey}`,
       'Content-Type': 'application/json',
-      'HTTP-Referer': openRouterSiteUrl,
-      'X-Title': openRouterAppName,
     },
     body: JSON.stringify({
-      model: usesWebSearch ? openRouterWebSearchModel : openRouterModel,
-      messages,
-      temperature: usesWebSearch ? 0 : 0.2,
-      max_tokens: usesWebSearch ? Math.min(groqRequestOptions.maxTokens, 360) : openRouterMaxTokens,
-      stream: false,
-      ...(usesWebSearch
-        ? {
-            plugins: [
-              {
-                id: 'web',
-                max_results: 1,
-                search_prompt: 'Relevant current web result:',
-              },
-            ],
-          }
-        : {}),
+      query,
+      max_results: tavilyMaxResults,
+      search_depth: 'basic',
+      topic: 'general',
     }),
-  }, groqRequestOptions.timeoutMs);
+  }, 15_000);
 
   if (!aiResponse.ok) {
     const errorBody = await aiResponse.text();
     const error = new Error(`HTTP ${aiResponse.status}: ${errorBody.slice(0, 500)}`);
     error.status = aiResponse.status;
-    setProviderErrorDetails(error, errorBody);
     throw error;
   }
 
   const data = await aiResponse.json();
-  return {
-    answer: extractChatCompletionText(data),
-    sources: extractOpenRouterSources(data),
-    provider: usesWebSearch ? 'openrouter-web-search' : 'openrouter',
-  };
+  return (data.results || [])
+    .map((result) => ({
+      title: cleanSourceTitle(result?.title || result?.url || ''),
+      url: String(result?.url || '').trim(),
+      content: String(result?.content || '').slice(0, 600),
+    }))
+    .filter((result) => result.url && /^https?:\/\//i.test(result.url))
+    .slice(0, tavilyMaxResults);
 }
 
-async function fetchOpenRouterWebSources(messages, groqRequestOptions) {
-  if (!openRouterApiKey || groqRequestOptions.provider !== 'groq-web-search') return [];
+function buildTavilyAnswerPrompt() {
+  return `Answer using only the reference material given in the user message below. Do not use outside knowledge and do not invent facts beyond what is provided.
+Write 2-5 concise bullet points. No tables. No inline URLs — sources are listed separately by the caller.
+If the material does not answer the question, say so briefly.`;
+}
 
-  const aiResponse = await fetchWithTimeout(openRouterChatCompletionsUrl, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${openRouterApiKey}`,
-      'Content-Type': 'application/json',
-      'HTTP-Referer': openRouterSiteUrl,
-      'X-Title': openRouterAppName,
-    },
-    body: JSON.stringify({
-      model: openRouterWebSearchModel,
-      messages: [
-        {
-          role: 'system',
-          content: `Find current, relevant web sources only. Date: ${currentDateLabel}. Return 3-5 markdown links only.`,
-        },
-        {
-          role: 'user',
-          content: `Find related sources for: ${getLastUserMessage(messages)}`,
-        },
-      ],
-      temperature: 0,
-      max_tokens: 220,
-      stream: false,
-      plugins: [
-        {
-          id: 'web',
-          max_results: 5,
-          search_prompt: 'Relevant current source:',
-        },
-      ],
-    }),
-  }, 18_000);
-
-  if (!aiResponse.ok) {
-    const errorBody = await aiResponse.text();
-    const error = new Error(`HTTP ${aiResponse.status}: ${errorBody.slice(0, 500)}`);
-    error.status = aiResponse.status;
-    setProviderErrorDetails(error, errorBody);
-    throw error;
-  }
-
-  const data = await aiResponse.json();
-  return dedupeSources([
-    ...extractOpenRouterSources(data),
-    ...extractSourcesFromText(extractChatCompletionText(data)),
-  ]).slice(0, 5);
+function cleanSearchQuery(rawQuestion) {
+  return String(rawQuestion || '')
+    .replace(/^Search current web results and answer briefly as of [^:]+:\s*/i, '')
+    .replace(/\s*Use reliable sports sources.*$/i, '')
+    .slice(0, 180)
+    .trim();
 }
 
 async function fetchRelatedWebSources(question) {
-  const query = String(question || '')
-    .replace(/^Search current web results and answer briefly as of [^:]+:\s*/i, '')
-    .slice(0, 180)
-    .trim();
+  const query = cleanSearchQuery(question);
   if (!query) return [];
 
   const rssUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-US&gl=US&ceid=US:en`;
@@ -750,66 +558,6 @@ async function streamGroq(messages, groqRequestOptions, onDelta, onSource) {
   }
 
   if (!aiResponse.body) throw new Error('Groq did not return a response stream');
-
-  const reader = aiResponse.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-    const events = buffer.split(/\n\n/);
-    buffer = events.pop() || '';
-
-    for (const event of events) {
-      if (processGroqStreamEvent(event, onDelta, onSource)) return;
-    }
-  }
-
-  if (buffer) processGroqStreamEvent(buffer, onDelta, onSource);
-}
-
-async function streamOpenRouter(messages, groqRequestOptions, onDelta, onSource) {
-  const usesWebSearch = groqRequestOptions.provider === 'groq-web-search';
-  const aiResponse = await fetchWithTimeout(openRouterChatCompletionsUrl, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${openRouterApiKey}`,
-      'Content-Type': 'application/json',
-      'HTTP-Referer': openRouterSiteUrl,
-      'X-Title': openRouterAppName,
-    },
-    body: JSON.stringify({
-      model: usesWebSearch ? openRouterWebSearchModel : openRouterModel,
-      messages,
-      temperature: usesWebSearch ? 0 : 0.2,
-      max_tokens: usesWebSearch ? Math.min(groqRequestOptions.maxTokens, 360) : openRouterMaxTokens,
-      stream: true,
-      ...(usesWebSearch
-        ? {
-            plugins: [
-              {
-                id: 'web',
-                max_results: 1,
-                search_prompt: 'Relevant current web result:',
-              },
-            ],
-          }
-        : {}),
-    }),
-  }, groqRequestOptions.timeoutMs);
-
-  if (!aiResponse.ok) {
-    const errorBody = await aiResponse.text();
-    const error = new Error(`HTTP ${aiResponse.status}: ${errorBody.slice(0, 500)}`);
-    error.status = aiResponse.status;
-    setProviderErrorDetails(error, errorBody);
-    throw error;
-  }
-
-  if (!aiResponse.body) throw new Error('OpenRouter did not return a response stream');
 
   const reader = aiResponse.body.getReader();
   const decoder = new TextDecoder();
@@ -1065,52 +813,6 @@ function extractGroqToolSources(data) {
   }
 
   return sources;
-}
-
-function extractOpenRouterSources(data) {
-  const annotations = data.choices?.[0]?.message?.annotations;
-  if (!Array.isArray(annotations)) return [];
-
-  const sources = [];
-  const seenUrls = new Set();
-
-  for (const annotation of annotations) {
-    const citation = annotation?.url_citation || {};
-    const url = String(citation.url || '').trim();
-    const title = String(citation.title || citation.url || '').trim();
-    if (!url || !title || !/^https?:\/\//i.test(url) || seenUrls.has(url)) continue;
-
-    seenUrls.add(url);
-    sources.push({ title, url });
-    if (sources.length >= 5) break;
-  }
-
-  return sources;
-}
-
-function extractSourcesFromText(text) {
-  const sources = [];
-  const markdownLinkPattern = /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g;
-  const rawUrlPattern = /(https?:\/\/[^\s)]+)/g;
-  let match;
-
-  while ((match = markdownLinkPattern.exec(text)) !== null) {
-    sources.push({
-      title: cleanSourceTitle(match[1]),
-      url: cleanSourceUrl(match[2]),
-    });
-  }
-
-  while ((match = rawUrlPattern.exec(text)) !== null) {
-    const url = cleanSourceUrl(match[1]);
-    if (sources.some((source) => source.url === url)) continue;
-    sources.push({
-      title: urlToSourceTitle(url),
-      url,
-    });
-  }
-
-  return sources.filter((source) => source.title && /^https?:\/\//i.test(source.url));
 }
 
 function dedupeSources(sources) {
